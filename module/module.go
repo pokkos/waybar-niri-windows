@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand/v2"
+	"runtime"
 	"slices"
 	"strconv"
 	"sync"
@@ -13,8 +14,18 @@ import (
 	"wnw/niri"
 
 	"github.com/gotk3/gotk3/gdk"
+	"github.com/gotk3/gotk3/glib"
 	"github.com/gotk3/gotk3/gtk"
 )
+
+// safeDestroy cancels the Go finalizer on a widget before calling Destroy().
+// GetChildren() wraps each child via glib.Take(), which registers a finalizer
+// that calls g_object_unref. If we call Destroy() (which also unrefs), the
+// later finalizer will unref an already-freed object, causing a SIGSEGV.
+func safeDestroy(w *gtk.Widget) {
+	runtime.SetFinalizer(w.Object, nil)
+	w.Destroy()
+}
 
 type Instance struct {
 	mu              sync.RWMutex
@@ -231,7 +242,7 @@ func (i *Instance) Update() {
 	i.box.GetChildren().Foreach(func(child any) {
 		w := child.(*gtk.Widget)
 		if n, err := w.GetName(); err != nil || n != floatingViewName {
-			w.Destroy()
+			safeDestroy(w)
 		}
 	})
 
@@ -351,25 +362,32 @@ func (i *Instance) drawFloating(maxWidth int, maxHeight int, floating []*niri.Wi
 
 	existingWindows := make(map[string]struct{})
 	i.floatingFixed.GetChildren().Foreach(func(item any) {
-		windowBox := &gtk.EventBox{Bin: gtk.Bin{Container: gtk.Container{Widget: *item.(*gtk.Widget)}}}
+		w := item.(*gtk.Widget)
+		// Reuse the *glib.Object from the widget wrapper returned by
+		// GetChildren (which called glib.Take → RefSink + SetFinalizer).
+		// Do NOT copy the Widget struct or create a new glib.Object — that
+		// would either share or duplicate the finalizer, leading to a
+		// double g_object_unref and SIGSEGV.
+		windowBox := &gtk.EventBox{Bin: gtk.Bin{Container: gtk.Container{Widget: gtk.Widget{InitiallyUnowned: glib.InitiallyUnowned{Object: w.Object}}}}}
+
 		id, _ := windowBox.GetName()
 		var window *niri.Window
-		for _, w := range floating {
-			if id == strconv.FormatUint(w.Id, 10) {
+		for _, fw := range floating {
+			if id == strconv.FormatUint(fw.Id, 10) {
 				existingWindows[id] = struct{}{}
-				window = w
+				window = fw
 				break
 			}
 		}
 
 		if window == nil {
-			windowBox.Destroy()
+			safeDestroy(w)
 			return
 		}
 
-		x, y, w, h := i.getFloatingLayout(window, scale, maxWidth, maxHeight)
+		x, y, bw, bh := i.getFloatingLayout(window, scale, maxWidth, maxHeight)
 		i.floatingFixed.Move(windowBox, x, y)
-		windowBox.SetSizeRequest(w, h)
+		windowBox.SetSizeRequest(bw, bh)
 
 		style, _ := windowBox.GetStyleContext()
 		if window.IsUrgent && !style.HasClass("urgent") {
@@ -385,6 +403,7 @@ func (i *Instance) drawFloating(maxWidth int, maxHeight int, floating []*niri.Wi
 		} else {
 			windowBox.UnsetStateFlags(gtk.STATE_FLAG_ACTIVE)
 		}
+		runtime.KeepAlive(w)
 	})
 
 	for _, window := range floating {
@@ -459,7 +478,7 @@ func (i *Instance) applyWindowRules(windowBox *gtk.EventBox, window *niri.Window
 	style, _ := windowBox.ToWidget().GetStyleContext()
 	iconAdded := false
 	windowBox.GetChildren().Foreach(func(child any) {
-		child.(*gtk.Widget).Destroy()
+		safeDestroy(child.(*gtk.Widget))
 	})
 
 	for _, rule := range i.config.WindowRules {
