@@ -28,6 +28,16 @@ static inline void QueueUpdate(void (*queue_update)(wbcffi_module *), wbcffi_mod
 */
 import "C"
 
+func init() {
+	// Schedule GC-driven g_object_unref calls on the GTK main thread.
+	// By default, gotk3 runs them from Go's finalizer goroutine, which races
+	// with GTK operations on the main thread and can corrupt GObject state
+	// (e.g., class vtable pointers), leading to SIGSEGV.
+	glib.FinalizerStrategy = func(f glib.Finalizer) {
+		glib.IdleAdd(f)
+	}
+}
+
 var global = state.New()
 
 //export wbcffi_init

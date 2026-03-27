@@ -313,9 +313,11 @@ func (i *Instance) Update() {
 				i.applyWindowRules(windowBox, window, len(column) == 1 || i.config.IconMinSize > 0)
 
 				colBox.Add(windowBox)
+				runtime.KeepAlive(windowBox)
 			}
-
+			runtime.KeepAlive(colBox)
 		}
+		runtime.KeepAlive(cols)
 	}
 
 	if i.config.FloatingPosition == FloatingPositionRight {
